@@ -1,0 +1,577 @@
+%include "/usr/local/share/csc314/asm_io.inc"
+
+; the file that stores the initial state
+%define BOARD_FILE 'board.txt'
+
+; how to represent everything
+%define WALL_CHAR '#'
+%define PLAYER_CHAR 'O'
+%define MONSTER_CHAR 'M'
+
+; character representing gold
+%define GOLD_CHAR 'G'
+
+; the size of the game screen in characters
+%define HEIGHT 20
+%define WIDTH 40
+
+; the player starting position.
+; top left is considered (0,0)
+%define STARTX 1
+%define STARTY 1
+
+; these keys do things
+%define EXITCHAR 'x'
+%define UPCHAR 'w'
+%define LEFTCHAR 'a'
+%define DOWNCHAR 's'
+%define RIGHTCHAR 'd'
+%define LEFTCHARSPRINT 'j' ;ADDED CODE , sprints/moves 2 squares left
+%define RIGHTCHARSPRINT 'k' ;ADDED CODE , sprints/moves 2 squares right
+%define TELEPORT 't'            ; ADDED CODE, teleports to a random area
+
+segment .data
+
+    ; used to fopen() the board file defined above
+    board_file		db BOARD_FILE,0
+
+    ; used to change the terminal mode
+    mode_r		db "r",0
+    raw_mode_on_cmd 	db "stty raw -echo",0
+    raw_mode_off_cmd	db "stty -raw echo",0
+
+    ; ANSI escape sequence to clear/refresh the screen
+    clear_screen_code       db      27,"[2J",27,"[H",0
+
+    ; things the program will print
+    help_str	db 13,10,"Controls: ", \
+                   UPCHAR,"=UP / ", \
+                   LEFTCHAR,"=LEFT / ", \
+                   DOWNCHAR,"=DOWN / ", \
+                   RIGHTCHAR,"=RIGHT / ", \
+                   EXITCHAR,"=EXIT /", \
+                   13,10,10,0
+
+    monster_msg db "You encountered a monster! Game Over.", 10, 0 ;message if you run into the MONSTER
+	
+	; score string by the help menu						
+	score_str	db "Score: %d",13,10,0
+
+segment .bss
+
+    ; this array stores the current rendered gameboard (HxW)
+    board   resb    (HEIGHT * WIDTH)
+
+    ; these variables store the current player position
+    xpos    resd    1
+    ypos    resd    1
+
+    ; coordinates for a monster
+    monster_x resd 1
+    monster_y resd 1
+	
+	; coordinates for gold
+	gold_x  resd    1
+	gold_y  resd	1
+	
+	; stores score
+	score   resd    1
+
+segment .text
+
+    global  asm_main
+    global  raw_mode_on
+    global  raw_mode_off
+    global  init_board
+    global  render
+	global  generate_monster
+	global  generate_gold
+
+    extern  system
+    extern  putchar
+    extern  getchar
+    extern  printf
+    extern  fopen
+    extern  fread
+    extern  fgetc
+    extern  fclose
+    extern  rand
+    extern  time
+	
+asm_main:
+    push    ebp
+    mov     ebp, esp
+
+    ; put the terminal in raw mode so the game works nicely
+    call    raw_mode_on
+
+    ; read the game board file into the global variable
+    call    init_board
+
+    ; set the player at the proper start position
+    mov		DWORD [xpos], STARTX
+    mov		DWORD [ypos], STARTY
+	
+	; generates monster
+    call 	generate_monster ;generates the monster before the game loop
+
+    ; generates gold
+    call    generate_gold ; generates gold before game loop
+    ; the game happens in this loop
+    ; the steps are...
+    ;   1. render (draw) the current board
+    ;   2. get a character from the user
+    ;       3. store current xpos,ypos in esi,edi
+    ;       4. update xpos,ypos based on character from user
+    ;       5. check what's in the buffer (board) at new xpos,ypos
+    ;       6. if it's a wall, reset xpos,ypos to saved esi,edi
+    ;       7. otherwise, just continue! (xpos,ypos are ok)
+	
+	game_loop:
+
+        ; draw the game board
+        call    render
+
+        ; get an action from the user
+        call    getchar
+
+        ; store the current position
+        ; we will test if the new position is legal
+        ; if not, we will restore these
+        mov		esi, DWORD [xpos]
+        mov		edi, DWORD [ypos]
+
+        ; choose what to do
+        cmp		eax, EXITCHAR
+        je 		game_loop_end
+        cmp		eax, UPCHAR
+        je 		move_up
+        cmp		eax, LEFTCHAR
+        je 		move_left
+        cmp		eax, DOWNCHAR
+        je 		move_down
+        cmp		eax, RIGHTCHAR
+        je 		move_right
+		
+		cmp     eax, RIGHTCHARSPRINT    ; ADDED CODE
+        je      move_right_sprint       ; ADDED CODE
+        cmp     eax, LEFTCHARSPRINT     ; ADDED CODE
+        je      move_left_sprint        ; ADDED CODE
+        cmp     eax, TELEPORT           ; ADDED CODE
+        je      move_teleport           ; ADDED CODE
+		
+        jmp		input_end                       ; or just do nothing
+
+        ; move the player according to the input character
+        move_up:
+            dec		DWORD [ypos]
+            jmp		input_end
+        move_left:
+            dec		DWORD [xpos]
+            jmp		input_end
+        move_down:
+            inc		DWORD [ypos]
+            jmp		input_end
+        move_right:
+            inc		DWORD [xpos]
+			jmp		input_end
+	    move_right_sprint:                      ; ADDED CODE
+			add     DWORD [xpos], 2 ; ADDED CODE
+            jmp     input_end               ; ADDED CODE
+        move_left_sprint:                       ; ADDED CODE
+            sub     DWORD [xpos], 2 ; ADDED CODE
+            jmp     input_end               ; ADDED CODE
+;TELEPORT START CODE
+        move_teleport:                          ; ADDED CODE
+; to teleport, I will take a random prime number (59)
+; and take the modulus of it and xpos (59%xpos)
+; and the modulus will be the number that i add
+; or subtract to the x value
+            mov     eax,59
+            cdq                                            ; extend eax into edx:eax
+            mov     ecx, DWORD [xpos]
+            add     ecx, 1
+            idiv    ecx                             ; ecx=edx:eax(59)/ecx(x)
+            mov     eax, edx                ; edx is the mod
+
+;if xpos > 20 i will subtract from the position,
+; if xpos <= 20 i will add to position
+            cmp     DWORD [xpos], 20
+            jg      xpos_greater_20
+            cmp     DWORD [xpos], 20
+            jle     xpos_less_20
+
+            xpos_greater_20:
+				sub     DWORD [xpos], eax
+					
+				mov     eax, 71 ; same algorithm for ypos but w 71
+				cdq
+                mov     ecx, DWORD [ypos]
+                add     ecx, 1
+                idiv    ecx
+                mov     eax, edx
+                cmp     DWORD [ypos], 10
+                jg      ypos_greater
+                cmp     DWORD [ypos], 10
+                jle     ypos_less
+					
+                ypos_greater:
+                    sub     DWORD [ypos], eax
+                    jmp     end
+                ypos_less:
+                    add     DWORD [ypos], eax
+                    jmp     end
+                end:
+                    jmp     input_end
+						
+                xpos_less_20:
+                    add     DWORD [xpos], eax
+					mov 	eax, 71
+					cdq	
+					mov 	ecx, DWORD [ypos]
+					add 	ecx, 1
+					idiv	ecx
+					mov 	eax, edx
+					cmp 	DWORD [ypos], 10
+					jg  	ypos_greater2
+					cmp 	DWORD [ypos], 10
+					jle 	ypos_less2
+					
+            ypos_greater2:
+                sub     DWORD [ypos], eax
+                jmp     end2
+				
+            ypos_less2:
+                add     DWORD [ypos], eax
+                jmp     end2
+				
+            end2:
+                jmp     input_end
+;TELEPORT END CODE	
+		
+    input_end:
+
+        ; (W * y) + x = pos
+
+        ; compare the current position to the wall character
+        mov		eax, WIDTH
+        mul		DWORD [ypos]
+        add		eax, DWORD [xpos]
+        lea		eax, [board + eax]
+        cmp		BYTE [eax], WALL_CHAR
+        jne		valid_move
+		
+            ; opps, that was an invalid move, reset
+        mov		DWORD [xpos], esi
+        mov		DWORD [ypos], edi
+			
+        valid_move:
+			
+			; Checks if monster was hit
+			mov		eax, [xpos]
+			cmp		eax, [monster_x]
+			jne		.no_monster
+			mov		eax, [ypos]
+			cmp		eax, [monster_y]
+			jne		.no_monster
+			
+			; Player hit the monster!
+			mov  	eax, monster_msg
+			call 	print_string
+			jmp  	game_loop_end
+
+			.no_monster:
+			
+				; check for gold
+				mov 	eax, DWORD [xpos]
+				cmp 	eax, DWORD [gold_x]
+				jne 	no_gold_pickup
+				mov 	eax, DWORD [ypos]
+				cmp 	eax, DWORD [gold_y]
+				jne	 	no_gold_pickup
+				
+				; Player found gold
+				inc		DWORD [score] ; +1 to score
+			    call    generate_gold ; re-generates gold position after pickup	
+				no_gold_pickup:
+				
+				; continue looping
+				jmp 	game_loop
+
+        game_loop_end:
+
+            call 	raw_mode_off
+
+            mov 	eax, 0
+            mov 	esp, ebp
+            pop 	ebp
+            ret
+
+; Picks a random interior cell (never on borders), then retries
+; if it lands on the player's start position.
+generate_monster:
+    
+    call    rand
+    xor     ebx, ebx
+    mov     ecx, HEIGHT
+    div     ecx
+    mov     [monster_x], edx
+
+    call    rand
+    xor     edx, edx
+    mov     ecx, HEIGHT
+    div     ecx
+    mov     [monster_y], edx
+	
+    ; avoid spawning directly on the player's start
+    mov     eax, [monster_x]
+    cmp     eax, STARTX
+    je      generate_monster
+    mov     eax, [monster_y]
+    cmp     eax, STARTY
+    je      generate_monster
+
+    ret
+
+; Does the same function as the monster generation, but for the gold instead.
+; Also checks for player starting position.
+generate_gold:
+    
+    call    rand
+    xor     edx, edx
+    mov     ecx, HEIGHT
+    div     ecx
+    mov     [gold_x], edx
+
+    call    rand
+    xor     edx, edx
+    mov     ecx, HEIGHT
+    div     ecx
+    mov     [gold_y], edx
+	
+    ; avoid spawning directly on the player's start
+    mov     eax, [gold_x]
+    cmp     eax, STARTX
+    je      generate_gold
+    mov     eax, [gold_y]
+    cmp     eax, STARTY
+    je      generate_gold
+	
+	; deconflicts with monster position
+	mov     eax, [gold_x]
+    cmp     eax, [monster_x]
+    je      generate_gold
+    mov     eax, [gold_y]
+    cmp     eax, [monster_y]
+    je      generate_gold 	
+    
+    mov		eax, WIDTH
+    mul		DWORD [gold_y]
+    add		eax, DWORD [gold_x]
+    lea		eax, [board + eax]
+    cmp		BYTE [eax], WALL_CHAR
+    je 		generate_gold
+    
+    ret
+
+raw_mode_on:
+
+        push    ebp
+        mov     ebp, esp
+
+        push    raw_mode_on_cmd
+        call    system
+        add		esp, 4
+		
+        mov		esp, ebp
+        pop		ebp
+        ret
+
+raw_mode_off:
+
+        push    ebp
+        mov     ebp, esp
+
+        push    raw_mode_off_cmd
+        call    system
+        add     esp, 4
+
+        mov     esp, ebp
+        pop     ebp
+        ret
+
+init_board:
+
+        push    ebp
+        mov     ebp, esp
+
+        ; FILE* and loop counter
+        ; ebp-4, ebp-8
+        sub     esp, 8
+
+        ; open the file
+        push    mode_r
+        push    board_file
+        call    fopen
+        add     esp, 8
+        mov     DWORD [ebp - 4], eax
+
+        ; read the file data into the global buffer
+        ; line-by-line so we can ignore the newline characters
+        mov 	DWORD [ebp - 8], 0
+		
+        read_loop:
+			cmp		DWORD [ebp - 8], HEIGHT
+			je 		read_loop_end
+
+            ; find the offset (WIDTH * counter)
+            mov		eax, WIDTH
+            mul		DWORD [ebp - 8]
+            lea		ebx, [board + eax]
+
+			; read the bytes into the buffer
+			push    DWORD [ebp - 4]
+			push    WIDTH
+			push    1
+			push    ebx
+			call    fread
+			add     esp, 16
+		
+			; slurp up the newline
+			push    DWORD [ebp - 4]
+			call    fgetc
+			add     esp, 4
+		
+			inc		DWORD [ebp - 8]
+			jmp		read_loop
+			
+        read_loop_end:
+
+        ; close the open file handle
+        push    DWORD [ebp - 4]
+        call    fclose
+        add     esp, 4
+
+        mov     esp, ebp
+        pop     ebp
+        ret
+
+render:
+
+    push    ebp
+    mov     ebp, esp
+
+    ; two ints, for two loop counters
+    ; ebp-4, ebp-8
+    sub     esp, 8
+
+    ; clear the screen
+    push    clear_screen_code
+    call    printf
+    add             esp, 4
+
+    ; print the help information
+    push    help_str
+    call    printf
+    add     esp, 4
+			
+	; print the score on the screen
+	push    DWORD [score]
+	push    score_str
+	call    printf
+	add     esp, 8
+
+    ; outside loop by height
+    ; i.e. for(c=0; c<height; c++)
+    mov		DWORD [ebp - 4], 0
+		
+    y_loop_start:
+		cmp		DWORD [ebp - 4], HEIGHT
+		je 		y_loop_end
+
+        ; inside loop by width
+        ; i.e. for(c=0; c<width; c++)
+        mov		DWORD [ebp - 8], 0
+				
+        x_loop_start:
+			cmp		DWORD [ebp - 8], WIDTH
+			je 		x_loop_end
+
+            ; check if (xpos,ypos)=(x,y)
+            mov		eax, DWORD [xpos]
+            cmp		eax, DWORD [ebp - 8]
+            jne		check_monster       ; check monster when not equal because now we have a monster piece on the board.
+            mov		eax, DWORD [ypos]
+            cmp		eax, DWORD [ebp - 4]
+            jne		check_monster
+						
+            ; if both were equal, print the player
+            push    PLAYER_CHAR
+            call    putchar
+            add     esp, 4
+            jmp     print_end
+
+                check_monster:
+                    ; check if the monster is here
+                    mov 	eax, [monster_x]
+                    cmp 	eax, DWORD [ebp - 8]
+                    jne 	check_gold
+                    mov 	eax, [monster_y]
+                    cmp 	eax, DWORD [ebp - 4]
+                    jne 	check_gold
+					
+					; if monster is not there, then push monster to board.
+                    push 	MONSTER_CHAR
+                    call 	putchar
+                    add 	esp, 4
+                    jmp     print_end
+					
+					check_gold:
+						; check if gold is there
+						mov 	eax, [gold_x]
+						cmp 	eax, DWORD [ebp - 8]
+						jne 	print_board
+						mov 	eax, [gold_y]
+						cmp 	eax, DWORD [ebp - 4]
+						jne 	print_board
+						
+						push 	GOLD_CHAR
+						call 	putchar
+						add 	esp, 4
+						jmp		print_end
+					
+                    print_board:
+                        ; otherwise print whatever's in the buffer
+                        mov     eax, DWORD [ebp - 4]
+                        mov     ebx, WIDTH
+                        mul     ebx
+                        add     eax, DWORD [ebp - 8]
+                        mov     ebx, 0
+                        mov     bl, BYTE [board + eax]
+                        push    ebx
+                        call    putchar
+                        add     esp, 4
+								
+                        print_end:
+							inc		DWORD [ebp - 8]
+							jmp		x_loop_start
+							
+        x_loop_end:
+
+            ; write a carriage return (necessary when in raw mode)
+            push    0x0d
+            call    putchar
+            add             esp, 4
+
+            ; write a newline
+            push    0x0a
+            call    putchar
+            add             esp, 4
+			inc		DWORD [ebp - 4]
+			jmp		y_loop_start
+			
+    y_loop_end:
+
+mov		esp, ebp
+pop		ebp
+ret
